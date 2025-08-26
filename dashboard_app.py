@@ -63,7 +63,7 @@ st.markdown("""
 def load_data():
     """Load and preprocess the network performance data"""
     try:
-        df = pd.read_csv('last_version_with_predictions.csv')
+        df = pd.read_csv('dashboard_ready_with_predictions.csv')
         
         # Create timestamp from existing columns
         if 'month' in df.columns and 'day' in df.columns and 'hour' in df.columns:
@@ -217,7 +217,7 @@ def main():
     # Load data
     df = load_data()
     if df.empty:
-        st.error("No data available. Please check if 'last_version_with_predictions.csv' exists and is properly formatted.")
+        st.error("No data available. Please check if 'dashboard_ready_with_predictions.csv' exists and is properly formatted.")
         return
     
     # Calculate performance scores
