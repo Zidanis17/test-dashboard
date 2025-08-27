@@ -12,6 +12,24 @@ import warnings
 from scipy import stats
 warnings.filterwarnings('ignore')
 
+def get_time_format(df, time_col):
+    """Determine appropriate time format based on data span and frequency"""
+    if df.empty or time_col not in df.columns:
+        return '%Y-%m-%d %H:%M'
+    
+    time_span = df[time_col].max() - df[time_col].min()
+    time_diff = df[time_col].diff().median()
+    
+    if time_span < pd.Timedelta(hours=2):
+        return '%H:%M:%S'  # Show seconds for very short spans
+    elif time_span < pd.Timedelta(days=1):
+        return '%H:%M'     # Show hour:minute for single day
+    elif time_span < pd.Timedelta(days=7):
+        return '%m-%d %H:%M'  # Show month-day hour:minute for week
+    else:
+        return '%Y-%m-%d' 
+
+
 # Page configuration
 st.set_page_config(
     page_title="Mobile Network Analytics Dashboard",
@@ -85,17 +103,22 @@ def load_data():
         df = pd.read_csv('dashboard_ready_with_predictions.csv')
         
         # Create timestamp from existing columns
-        if 'month' in df.columns and 'day' in df.columns and 'hour' in df.columns:
-            # Infer year: December = 2024, others = 2025
+        if 'Timestamp' in df.columns:
+            df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
+        elif 'month' in df.columns and 'day' in df.columns and 'hour' in df.columns:
+            # Fallback to manual construction
+            if 'minute' not in df.columns:
+                df['minute'] = 0
+            
             df['year'] = 2025
             df.loc[df['month'] == 12, 'year'] = 2024
             
-            # Create timestamp
             df['Timestamp'] = pd.to_datetime(
                 df['year'].astype(str) + '-' + 
                 df['month'].astype(str) + '-' + 
                 df['day'].astype(str) + ' ' + 
-                df['hour'].astype(str) + ':00:00',
+                df['hour'].astype(str) + ':' + 
+                df['minute'].astype(str) + ':00',
                 errors='coerce'
             )
         else:
@@ -209,7 +232,13 @@ def create_enhanced_performance_dashboard(df, time_col):
         
         # Add moving average
         if len(df) > 10:
-            ma_window = min(24, len(df) // 4)
+            time_diff = df[time_col].diff().median()
+            if time_diff < pd.Timedelta(minutes=5):
+                ma_window = min(60, len(df) // 10)  # For minute-level data
+            elif time_diff < pd.Timedelta(hours=1):
+                ma_window = min(24, len(df) // 4)   # For hourly data  
+            else:
+                ma_window = min(7, len(df) // 4) 
             df['dl_ma'] = df['DL_bitrate'].rolling(window=ma_window, center=True).mean()
             fig.add_trace(
                 go.Scatter(
@@ -440,7 +469,8 @@ def create_enhanced_performance_dashboard(df, time_col):
     # Update individual subplot layouts
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
-    
+    time_format = get_time_format(df, time_col)
+    fig.update_xaxes(tickformat=time_format)
     return fig
 
 def create_interactive_geo_map(df):
@@ -628,11 +658,22 @@ def create_advanced_predictive_charts(df, time_col):
     # 4. Future Performance Projection
     if 'predicted_downlink_throughput' in df.columns:
         # Create time-based projection
+        time_diff = df[time_col].diff().median()
+        if time_diff < pd.Timedelta(minutes=5):
+            freq = 'T'  # Minute frequency
+            periods = 60  # Next 60 minutes
+        elif time_diff < pd.Timedelta(hours=1):
+            freq = 'H'  # Hour frequency  
+            periods = 24  # Next 24 hours
+        else:
+            freq = 'D'  # Day frequency
+            periods = 7   # Next 7 days
+            
         future_times = pd.date_range(
             start=df[time_col].max(), 
-            periods=24, 
-            freq='H'
-        )[1:]  # Exclude the first point to avoid duplication
+            periods=periods, 
+            freq=freq
+        )[1:]
         
         # Simple trend projection (you could enhance this with actual ML models)
         recent_data = df.tail(48)  # Last 48 hours
@@ -761,6 +802,85 @@ def main():
         except Exception as e:
             st.warning(f"Date filtering failed: {str(e)}. Showing all data.")
     
+    with st.sidebar.expander("📅 Advanced Time Control", expanded=False):
+        if time_col in filtered_df.columns and not filtered_df[time_col].isna().all():
+            filtered_df['date_only'] = filtered_df[time_col].dt.date
+            available_dates = sorted(filtered_df['date_only'].unique())
+
+            # Enhanced granularity options
+            view_mode = st.selectbox("Time Granularity", 
+                ["All Data", "Single Day (Hourly)", "Single Hour (Minute-by-Minute)", "Single Minute (Second-by-Second)"])
+
+            if view_mode == "Single Day (Hourly)":
+                selected_date = st.selectbox("Select Date", options=available_dates)
+                filtered_df = filtered_df[filtered_df['date_only'] == selected_date]
+
+                data_points = len(filtered_df)
+                st.info(f"📊 {data_points} data points on {selected_date}")
+
+                if data_points > 0:
+                    filtered_df['hour_only'] = filtered_df[time_col].dt.hour
+                    available_hours = sorted(filtered_df['hour_only'].unique())
+                    if len(available_hours) > 1:
+                        hour_range = st.select_slider("Hour Range", 
+                                                    options=available_hours,
+                                                    value=(min(available_hours), max(available_hours)))
+
+                        filtered_df = filtered_df[
+                            (filtered_df['hour_only'] >= hour_range[0]) & 
+                            (filtered_df['hour_only'] <= hour_range[1])
+                        ]
+
+            elif view_mode == "Single Hour (Minute-by-Minute)":
+                selected_date = st.selectbox("Select Date", options=available_dates)
+                day_data = filtered_df[filtered_df['date_only'] == selected_date]
+
+                if len(day_data) > 0:
+                    day_data['hour_only'] = day_data[time_col].dt.hour
+                    available_hours = sorted(day_data['hour_only'].unique())
+                    selected_hour = st.selectbox("Select Hour", options=available_hours)
+                    hour_data = day_data[day_data['hour_only'] == selected_hour]
+
+                    if len(hour_data) > 0:
+                        hour_data['minute_only'] = hour_data[time_col].dt.minute
+                        available_minutes = sorted(hour_data['minute_only'].unique())
+
+                        if len(available_minutes) > 1:
+                            minute_range = st.select_slider("Minute Range",
+                                                          options=available_minutes,
+                                                          value=(min(available_minutes), max(available_minutes)))
+
+                            filtered_df = hour_data[
+                                (hour_data['minute_only'] >= minute_range[0]) & 
+                                (hour_data['minute_only'] <= minute_range[1])
+                            ]
+                        else:
+                            filtered_df = hour_data
+
+                        data_points = len(filtered_df)
+                        st.info(f"🕐 {data_points} data points from {selected_date} {selected_hour:02d}:{minute_range[0]:02d}-{minute_range[1]:02d}")
+
+            elif view_mode == "Single Minute (Second-by-Second)":
+                selected_date = st.selectbox("Select Date", options=available_dates)
+                day_data = filtered_df[filtered_df['date_only'] == selected_date]
+
+                if len(day_data) > 0:
+                    day_data['hour_only'] = day_data[time_col].dt.hour
+                    available_hours = sorted(day_data['hour_only'].unique())
+                    selected_hour = st.selectbox("Select Hour", options=available_hours)
+                    hour_data = day_data[day_data['hour_only'] == selected_hour]
+
+                    if len(hour_data) > 0:
+                        hour_data['minute_only'] = hour_data[time_col].dt.minute
+                        available_minutes = sorted(hour_data['minute_only'].unique())
+                        selected_minute = st.selectbox("Select Minute", options=available_minutes)
+
+                        filtered_df = hour_data[hour_data['minute_only'] == selected_minute]
+                        data_points = len(filtered_df)
+                        st.info(f"⏰ {data_points} data points from {selected_date} {selected_hour:02d}:{selected_minute:02d}")
+
+
+
     if filtered_df.empty:
         st.warning("No data matches the selected filters. Please adjust your selection.")
         return
@@ -1220,7 +1340,16 @@ def main():
         if 'predicted_downlink_throughput' in filtered_df.columns:
             st.markdown("#### 📅 Advanced Short-term Network Performance Forecast")
             
-            recent_data = filtered_df.tail(24)
+            time_diff = filtered_df[time_col].diff().median()
+            if time_diff < pd.Timedelta(minutes=5):
+                recent_data = filtered_df.tail(60)  # Last 60 minute-level points
+                time_unit = "minutes"
+            elif time_diff < pd.Timedelta(hours=1):
+                recent_data = filtered_df.tail(24)  # Last 24 hourly points
+                time_unit = "hours" 
+            else:
+                recent_data = filtered_df.tail(7)   # Last 7 daily points
+                time_unit = "days"
             if len(recent_data) > 1:
                 # Calculate multiple trend metrics
                 dl_trend = (recent_data['predicted_downlink_throughput'].iloc[-1] - recent_data['predicted_downlink_throughput'].iloc[0]) / len(recent_data)
